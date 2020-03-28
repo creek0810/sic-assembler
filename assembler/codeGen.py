@@ -1,3 +1,4 @@
+import os
 import sys
 
 from node import InstructionType
@@ -6,7 +7,7 @@ from sic import OPERATION
 
 
 class CodeGen:
-    def __init__(self):
+    def __init__(self, path):
         # preload reg into symbol table
         self.symbol = {
             "A": 0,
@@ -19,8 +20,11 @@ class CodeGen:
             "T": 5,
             "F": 6,
         }
+        self.mod = []
         self.starting = 0
         self.ending = 0
+        self.path = os.path.splitext(path)[0]+'.obj'
+        self.result = ""
 
     # write function
     def _write_header(self, program_name=None):
@@ -32,20 +36,26 @@ class CodeGen:
         program_name = program_name.ljust(6)
         starting = "{:06X}".format(self.starting)
         program_len = "{:06X}".format(self.ending - self.starting)
-        print(f"H{program_name}{starting}{program_len}")
+        self.result += f"H{program_name}{starting}{program_len}\n"
 
     def _write_code(self, starting, code):
         if len(code):
             starting = "{:06X}".format(starting)
             record_len = "{:02X}".format(len(code) // 2)
-            print(f"T{starting}{record_len}{code}")
+            self.result += f"T{starting}{record_len}{code}\n"
 
     def _write_end(self, first=None):
         if first:
             first = "{:06X}".format(first)
         else:
             first = "{:06X}".format(self.starting)
-        print(f"E{first}")
+        self.result += f"E{first}\n"
+
+    def _write_relocation(self):
+        for mod in self.mod:
+            loc = mod["loc"] - self.starting + 1
+            loc = "{:06X}".format(loc)
+            self.result += f"M{loc}{mod['size']}\n"
 
     # help function
     def _char_2_byte(self, char):
@@ -74,7 +84,7 @@ class CodeGen:
                 return int((len(instruction.operand[0]) - 3) / 2)
             elif instruction.operand[0][0] == "C":
                 return len(instruction.operand[0]) - 3
-        elif instruction.op == "BASE" or instrunction.op == "NOBASE":
+        elif instruction.op == "BASE" or instruction.op == "NOBASE":
             return 0
         else:
             print(f"Invalid instruction: {instruction.op}")
@@ -150,7 +160,7 @@ class CodeGen:
             tmp_code += 1
         return "{:02X}".format(tmp_code)
 
-    def _gen_f3_addr(self, instruction, pc, base):
+    def _gen_f3_addr(self, instruction, loc, pc, base):
         """ trying seq
             1. pc relative mode (-2048 ~ 2047)
             2. base relative mode (0 ~ 4095)
@@ -162,6 +172,11 @@ class CodeGen:
             address_mode += 1 << 3
         # b or p or e
         if instruction.e:
+            if instruction.i == 0 and instruction.n == 0:
+                # add modification record
+                self.mod.append(
+                    {"loc": loc, "size": "05"}
+                )
             address_mode += 1
             disp = "{:05X}".format(self.symbol[instruction.operand[0]])
         elif -2048 <= self.symbol[instruction.operand[0]] - pc <= 2047:
@@ -206,11 +221,10 @@ class CodeGen:
         address = "{:04X}".format(address)
         return f"{opcode}{address}"
 
-    def _gen_f34(self, instruction, pc, base):
+    def _gen_f34(self, instruction, loc, pc, base):
         # deal with special case "RSUB"
         if instruction.op == "RSUB":
             return "{:02X}0000".format(OPERATION[instruction.op]["code"] + 3)
-
         result = ""
         # immediate or indirect instruction
         if instruction.i == 1 or instruction.n == 1:
@@ -220,31 +234,29 @@ class CodeGen:
             if instruction.e == 1:
                 result += "1" + "{:05X}".format(int(instruction.operand[0]))
             else:
-                # TODO: symbol immediate
                 if instruction.operand[0] in self.symbol:
-                    result += self._gen_f3_addr(instruction, pc, base)
+                    result += self._gen_f3_addr(instruction, loc, pc, base)
                 else:
-                    result += "0" + "{:03X}".format(int(instruction.operand[0]))
+                    result += "0" + "{:03X}".format(
+                        int(instruction.operand[0])
+                    )
             return result
-        # sic instruction
-        # elif OPERATION[instruction.op]["sic"]:
-        #     return self._gen_sic(instruction)
         # sic xe simple instruction
         else:
             # gen op part
             tmp_code = OPERATION[instruction.op]["code"] + 3
             result = "{:02X}".format(tmp_code)
             # gen x, b, p, e and address
-            result += self._gen_f3_addr(instruction, pc, base)
+            result += self._gen_f3_addr(instruction, loc, pc, base)
             return result
 
-    def _gen_instruction(self, instruction, pc, base):
+    def _gen_instruction(self, instruction, loc, pc, base):
         if OPERATION[instruction.op]["format"] == "1":
             return "{:02X}".format(OPERATION[instruction.op]["code"])
         elif OPERATION[instruction.op]["format"] == "2":
             return self._gen_f2(instruction)
         else:
-            return self._gen_f34(instruction, pc, base)
+            return self._gen_f34(instruction, loc, pc, base)
 
     def _pass2(self, tree):
         # TODO: support base relative
@@ -265,6 +277,7 @@ class CodeGen:
 
             # point to next instruction
             inst_size = self._instruction_size(tree[cur_idx])
+            inst_loc = locctr
             locctr += inst_size
             cur_node = tree[cur_idx]
 
@@ -272,7 +285,9 @@ class CodeGen:
 
             # gen code
             if cur_node.type == InstructionType.SIC:
-                cur_code = self._gen_instruction(cur_node, locctr, base)
+                cur_code = self._gen_instruction(
+                    cur_node, inst_loc, locctr, base
+                )
             elif cur_node.op == "WORD":
                 # TODO: check this
                 cur_code = "{:06X}".format(int(cur_node.operand[0]))
@@ -297,9 +312,7 @@ class CodeGen:
                 base = None
                 continue
 
-
             # check if need to flush code
-            # print(cur_node.op, cur_node.operand, cur_code)
             if len(code_buffer + cur_code) <= 60:
                 code_buffer += cur_code
             else:
@@ -311,7 +324,7 @@ class CodeGen:
         buffer_begin = locctr
 
         # build relocation
-        # TODO: finish it
+        self._write_relocation()
 
         # build end
         if tree[cur_idx].operand[0]:
@@ -325,3 +338,6 @@ class CodeGen:
         self._pass1(tree)
         # code gen
         self._pass2(tree)
+        # write obj file
+        with open(self.path, "w+") as file:
+            file.write(self.result)
