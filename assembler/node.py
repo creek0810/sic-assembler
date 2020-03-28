@@ -7,4 +7,14 @@ class InstructionType(Enum):
     ASSEMBLER = auto()
 
 
-Instruction = namedtuple("Instruction", ["type", "label", "op", "operand"])
+"""
+    type: instruction type. May be "SIC", "ASSEMBLER"
+    label: label
+    op: operation
+    e: extend
+    i: immediate
+    n: indirect
+"""
+Instruction = namedtuple(
+    "Instruction", ["type", "label", "op", "operand", "e", "n", "i"]
+)
